@@ -44,17 +44,15 @@ bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
   await supabase.from('bot_subscribers').upsert({ chat_id: chatId.toString() });
 
-  // Якщо покупець перейшов з посилання ?tg=CHAT_ID — прив'язуємо автоматично
   const payload = msg.text?.split(' ')[1];
   if (payload && payload.startsWith('tg')) {
     const token = payload.slice(2);
-    // Зберігаємо chat_id тимчасово — прив'язка відбудеться при реєстрації/вході
     await supabase.from('bot_subscribers').upsert({ chat_id: chatId.toString(), pending_token: token });
   }
 
-  const siteUrl = process.env.SITE_URL || 'https://YOUR_SITE.vercel.app';
+  const siteUrl = process.env.SITE_URL || 'https://elegants-store.vercel.app';
   bot.sendMessage(chatId,
-    `👗 *Ласкаво просимо до Elegant's Store!*\n\nОтримуйте сповіщення про статус ваших замовлень прямо тут у Telegram.\n\nНатисніть кнопку нижче щоб перейти до магазину:`,
+    `👗 *Ласкаво просимо до Elegant's Store!*\n\nОтримуйте сповіщення про статус ваших замовлень прямо тут у Telegram.\n\nНажміть кнопку нижче щоб почати покупки!`,
     {
       parse_mode: 'Markdown',
       reply_markup: {
@@ -129,7 +127,6 @@ bot.on('callback_query', async (query) => {
   const statusLabels = { confirmed: '✅ Підтверджено', shipped: '🚚 Відправлено', cancelled: '❌ Скасовано' };
   bot.answerCallbackQuery(query.id, { text: `${statusLabels[newStatus]} — замовлення #${orderId}` });
 
-  // Редагуємо повідомлення — прибираємо кнопки якщо скасовано або відправлено
   try {
     const newKeyboard = newStatus === 'confirmed'
       ? { inline_keyboard: [[{ text: '🚚 Відправити', callback_data: `ship:${orderId}` }, { text: '❌ Скасувати', callback_data: `cancel:${orderId}` }]] }
@@ -137,7 +134,6 @@ bot.on('callback_query', async (query) => {
     await bot.editMessageReplyMarkup(newKeyboard, { chat_id: query.message.chat.id, message_id: query.message.message_id });
   } catch {}
 
-  // Сповіщаємо покупця якщо прив'язаний Telegram
   const buyerChatId = order.users?.telegram_chat_id;
   if (buyerChatId) {
     const msgMap = {
@@ -215,7 +211,6 @@ app.post('/api/auth/login', async (req, res) => {
   if (data.blocked) {
     return res.status(403).json({ error: data.block_reason || 'Ваш акаунт заблоковано. Зверніться до адміністратора.' });
   }
-  // Прив'язуємо Telegram якщо прийшов з бота і ще не прив'язаний
   if (telegram_chat_id && !data.telegram_chat_id) {
     await supabase.from('users').update({ telegram_chat_id: telegram_chat_id.toString() }).eq('id', data.id);
   }
@@ -332,20 +327,13 @@ app.post('/api/orders', auth, async (req, res) => {
 
   if (error) return res.status(500).json({ error });
 
-  // Збільшити лічильник використань промокоду
   if (promocode_id) {
-    await supabase.from('promocodes').rpc || await supabase
-      .from('promocodes')
-      .update({ uses_count: supabase.raw ? undefined : undefined })
-      .eq('id', promocode_id);
-    // використовуємо простий SQL increment
     await supabase.rpc('increment_promo_uses', { promo_id: promocode_id }).catch(() => {
       supabase.from('promocodes').select('uses_count').eq('id', promocode_id).single()
         .then(({ data: p }) => p && supabase.from('promocodes').update({ uses_count: p.uses_count + 1 }).eq('id', promocode_id));
     });
   }
 
-  // Notify telegram
   await notifyOrder(order);
 
   res.json(order);
@@ -357,7 +345,6 @@ app.get('/api/orders/my', auth, async (req, res) => {
 });
 
 app.get('/api/orders', adminAuth, async (req, res) => {
-  // Отримуємо список ID адмінів щоб виключити їхні замовлення
   const { data: admins } = await supabase.from('users').select('id').eq('role', 'admin');
   const adminIds = (admins || []).map(a => a.id);
 
@@ -433,12 +420,12 @@ app.get('/api/admin/stats', adminAuth, async (req, res) => {
     notAdmins(supabase.from('orders').select('id, total, created_at, status')),
     notAdmins(supabase.from('orders').select('total').eq('status', 'completed')),
     supabase.from('users').select('id').gte('created_at', today).eq('role', 'customer'),
-    supabase.rpc('get_product_stats', { from_date: req.query.from || '2024-01-01', to_date: req.query.to || new Date().toISOString() })  ]);
+    supabase.rpc('get_product_stats', { from_date: req.query.from || '2024-01-01', to_date: req.query.to || new Date().toISOString() })
+  ]);
 
   const orders = ordersRes.data || [];
   const revenue = (revenueRes.data || []).reduce((s, o) => s + o.total, 0);
 
-  // Chart data: orders per day (last 30 days)
   const chartData = {};
   orders.forEach(o => {
     const d = o.created_at?.split('T')[0];
@@ -455,13 +442,11 @@ app.get('/api/admin/stats', adminAuth, async (req, res) => {
 });
 
 // ─── ONLINE TRACKING ──────────────────────────────────────────────
-// Покупець пінгує кожні 5 хв щоб позначити себе онлайн
 app.post('/api/ping', auth, async (req, res) => {
   await supabase.from('users').update({ last_seen: new Date().toISOString() }).eq('id', req.user.id);
   res.json({ ok: true });
 });
 
-// Статистика юзерів для адмінки (без адмінів)
 app.get('/api/admin/users/stats', adminAuth, async (req, res) => {
   const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
   const today = new Date().toISOString().split('T')[0];
@@ -478,7 +463,6 @@ app.get('/api/admin/users/stats', adminAuth, async (req, res) => {
 });
 
 // ─── PROMOCODES ───────────────────────────────────────────────────
-// Перевірка промокоду (публічний)
 app.post('/api/promocodes/check', async (req, res) => {
   const { code } = req.body;
   if (!code) return res.status(400).json({ error: 'Введіть промокод' });
@@ -496,13 +480,11 @@ app.post('/api/promocodes/check', async (req, res) => {
   res.json({ id: data.id, type: data.type, value: data.value });
 });
 
-// Список промокодів (адмін)
 app.get('/api/promocodes', adminAuth, async (req, res) => {
   const { data } = await supabase.from('promocodes').select('*').order('created_at', { ascending: false });
   res.json(data || []);
 });
 
-// Створення промокоду (адмін)
 app.post('/api/promocodes', adminAuth, async (req, res) => {
   const { code, type, value, max_uses, expires_at, active } = req.body;
   const { data, error } = await supabase.from('promocodes')
@@ -512,19 +494,16 @@ app.post('/api/promocodes', adminAuth, async (req, res) => {
   res.json(data);
 });
 
-// Оновлення промокоду (адмін)
 app.put('/api/promocodes/:id', adminAuth, async (req, res) => {
   const { data } = await supabase.from('promocodes').update(req.body).eq('id', req.params.id).select().single();
   res.json(data);
 });
 
-// Видалення промокоду (адмін)
 app.delete('/api/promocodes/:id', adminAuth, async (req, res) => {
   await supabase.from('promocodes').delete().eq('id', req.params.id);
   res.json({ ok: true });
 });
 
-// Розсилка промокоду всім покупцям з Telegram (адмін)
 app.post('/api/promocodes/:id/broadcast', adminAuth, async (req, res) => {
   const { data: promo } = await supabase.from('promocodes').select('*').eq('id', req.params.id).single();
   if (!promo) return res.status(404).json({ error: 'Промокод не знайдено' });
@@ -554,7 +533,6 @@ app.post('/api/promocodes/:id/broadcast', adminAuth, async (req, res) => {
   res.json({ sent, total: users.length });
 });
 
-// Список покупців з кількістю і сумою замовлень
 app.get('/api/admin/customers', adminAuth, async (req, res) => {
   const { data: users } = await supabase
     .from('users')
@@ -583,7 +561,6 @@ app.get('/api/admin/customers', adminAuth, async (req, res) => {
   })));
 });
 
-// Блокування/розблокування покупця
 app.patch('/api/admin/customers/:id/block', adminAuth, async (req, res) => {
   const { blocked, reason } = req.body;
   const { data, error } = await supabase.from('users')
@@ -594,7 +571,6 @@ app.patch('/api/admin/customers/:id/block', adminAuth, async (req, res) => {
 });
 
 // ─── SETTINGS ─────────────────────────────────────────────────────
-// Публічні налаштування (банер)
 app.get('/api/settings', async (req, res) => {
   const { data } = await supabase.from('settings').select('key, value');
   const obj = {};
@@ -602,7 +578,6 @@ app.get('/api/settings', async (req, res) => {
   res.json(obj);
 });
 
-// Оновлення налаштувань (адмін)
 app.patch('/api/settings', adminAuth, async (req, res) => {
   const updates = Object.entries(req.body);
   for (const [key, value] of updates) {
@@ -626,4 +601,13 @@ app.post('/api/upload', adminAuth, upload.single('file'), async (req, res) => {
   res.json({ url: publicUrl });
 });
 
-app.listen(process.env.PORT || 4000, () => console.log('Server running on port', process.env.PORT || 4000));
+// ─── HEALTH CHECK ─────────────────────────────────────────────────
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', message: 'Server is running' });
+});
+
+app.listen(process.env.PORT || 4000, () => {
+  console.log('✅ Server running on port', process.env.PORT || 4000);
+  console.log('🤖 Telegram bot is connected');
+  console.log('📊 Supabase connected');
+});
